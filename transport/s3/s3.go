@@ -5,11 +5,16 @@ import (
 	http "net/http"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 
 	"github.com/imgproxy/imgproxy/v3/config"
 )
+
+// https://github.com/aws/aws-sdk-go/issues/1507
+// https://github.com/aws/aws-sdk/issues/69
+const NotModified = "NotModified"
 
 // transport implements RoundTripper for the 's3' protocol.
 type transport struct {
@@ -40,6 +45,22 @@ func New() (http.RoundTripper, error) {
 	return transport{s3.New(sess, s3Conf)}, nil
 }
 
+// AWS SDK return an error for all non-200 responses, but http.client should
+// only throw an error for nil responses. So we swallow any 304 errors so
+// that ETag caching from S3 continues to work, passing any others through
+func swallow304Error(err error) error {
+	if err == nil {
+		return nil
+	}
+	if aerr, ok := err.(awserr.Error); ok {
+		switch aerr.Code() {
+		case NotModified:
+			return nil
+		}
+	}
+	return err
+}
+
 func (t transport) RoundTrip(req *http.Request) (resp *http.Response, err error) {
 	input := &s3.GetObjectInput{
 		Bucket: aws.String(req.URL.Host),
@@ -58,7 +79,8 @@ func (t transport) RoundTrip(req *http.Request) (resp *http.Response, err error)
 
 	s3req, _ := t.svc.GetObjectRequest(input)
 
-	if err := s3req.Send(); err != nil {
+	err = swallow304Error(s3req.Send())
+	if err != nil {
 		return nil, err
 	}
 
